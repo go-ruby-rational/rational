@@ -39,16 +39,56 @@ var ErrInvalidArgument = errors.New("invalid value for convert()")
 // Rational is an exact ratio of two arbitrary-precision integers, normalised to
 // lowest terms with a positive denominator. The zero value is not valid; build a
 // Rational with New, FromInt or Parse.
+//
+// It carries two representations. Values whose numerator AND denominator both fit
+// in an int64 use the machine-word "fast path" (small == true, num/den held
+// directly, big == nil): arithmetic on two such values is done in int64 with
+// overflow detection and, on overflow, promotes to the *big.Rat path — this is
+// the MRI fixnum-num/den optimisation, and it never loses precision. Values that
+// do not fit int64 use the *big.Rat "slow path" (small == false). Both forms hold
+// the value in lowest terms with a positive denominator, exactly matching Ruby's
+// normalisation and MRI's byte-exact results.
 type Rational struct {
-	r *big.Rat
+	small    bool     // true: value is num/den; false: value is *big
+	num, den int64    // valid when small; den > 0, gcd(|num|, den) == 1
+	big      *big.Rat // valid when !small; nil otherwise
 }
 
-// wrap builds a Rational around a *big.Rat, copying so callers cannot mutate the
-// shared value. big.Rat already keeps lowest terms with a positive denominator,
-// matching Ruby's normalisation.
+// wrap builds a Rational from a *big.Rat. big.Rat already keeps lowest terms with
+// a positive denominator (matching Ruby's normalisation), so when both numerator
+// and denominator fit int64 the value is demoted to the fast int64 path; larger
+// values keep a private copy of the *big.Rat so callers cannot mutate it.
 func wrap(r *big.Rat) *Rational {
-	c := new(big.Rat).Set(r)
-	return &Rational{r: c}
+	if n, d := r.Num(), r.Denom(); n.IsInt64() && d.IsInt64() {
+		return &Rational{small: true, num: n.Int64(), den: d.Int64()}
+	}
+	return &Rational{big: new(big.Rat).Set(r)}
+}
+
+// rat returns the value as a *big.Rat. For a fast-path value it builds a fresh
+// *big.Rat (den > 0 is guaranteed, so SetFrac64 never panics); for a slow-path
+// value it returns the private *big.Rat, which callers must treat as read-only.
+func (a *Rational) rat() *big.Rat {
+	if a.small {
+		return new(big.Rat).SetFrac64(a.num, a.den)
+	}
+	return a.big
+}
+
+// clone returns an independent copy sharing no mutable state with a.
+func (a *Rational) clone() *Rational {
+	if a.small {
+		return &Rational{small: true, num: a.num, den: a.den}
+	}
+	return &Rational{big: new(big.Rat).Set(a.big)}
+}
+
+// isZero reports whether the value is 0, on either representation.
+func (a *Rational) isZero() bool {
+	if a.small {
+		return a.num == 0
+	}
+	return a.big.Sign() == 0
 }
 
 // New returns the Rational num/den reduced to lowest terms with a positive
@@ -63,12 +103,16 @@ func New(num, den *big.Int) (*Rational, error) {
 
 // FromInt returns the Rational n/1 (Ruby's Integer#to_r / Rational(n)).
 func FromInt(n *big.Int) *Rational {
-	return wrap(new(big.Rat).SetInt(n))
+	if n.IsInt64() {
+		return &Rational{small: true, num: n.Int64(), den: 1}
+	}
+	return &Rational{big: new(big.Rat).SetInt(n)}
 }
 
-// FromInt64 is a convenience constructor for FromInt(big.NewInt(n)).
+// FromInt64 is a convenience constructor for FromInt(big.NewInt(n)); the value
+// n/1 always fits the fast int64 path.
 func FromInt64(n int64) *Rational {
-	return wrap(new(big.Rat).SetInt64(n))
+	return &Rational{small: true, num: n, den: 1}
 }
 
 // Parse converts a string to a Rational the way Ruby's Rational(String) does:
@@ -90,7 +134,13 @@ func Parse(s string) (*Rational, error) {
 		}
 		return New(num, den)
 	}
-	// Bare integer or decimal/scientific form: big.Rat parses both exactly.
+	// Bare integer or plain decimal: an int64 fast path avoids allocating a
+	// *big.Rat for the common small case ("3", "3.14159"), matching MRI's exact
+	// result. Scientific notation and out-of-int64 magnitudes fall through to the
+	// big.Rat parser, which parses both forms exactly.
+	if num, den, ok := parseDecimalFast(t); ok {
+		return newFrac64(num, den), nil
+	}
 	r, ok := new(big.Rat).SetString(t)
 	if !ok {
 		return nil, ErrInvalidArgument
@@ -101,11 +151,17 @@ func Parse(s string) (*Rational, error) {
 // Numerator returns the numerator (Ruby's Rational#numerator); the sign of the
 // Rational lives here.
 func (a *Rational) Numerator() *big.Int {
-	return new(big.Int).Set(a.r.Num())
+	if a.small {
+		return big.NewInt(a.num)
+	}
+	return new(big.Int).Set(a.big.Num())
 }
 
 // Denominator returns the (always positive) denominator (Ruby's
 // Rational#denominator).
 func (a *Rational) Denominator() *big.Int {
-	return new(big.Int).Set(a.r.Denom())
+	if a.small {
+		return big.NewInt(a.den)
+	}
+	return new(big.Int).Set(a.big.Denom())
 }

@@ -18,7 +18,7 @@ func floatPow(base, exp float64) float64 { return math.Pow(base, exp) }
 // ToF returns the nearest float64 (Ruby's Rational#to_f). big.Rat.Float64 rounds
 // to nearest-even, matching MRI.
 func (a *Rational) ToF() float64 {
-	f, _ := a.r.Float64()
+	f, _ := a.rat().Float64()
 	return f
 }
 
@@ -31,20 +31,22 @@ func (a *Rational) ToI() *big.Int {
 // ToR returns a copy of the Rational (Ruby's Rational#to_r — it is already a
 // Rational and returns itself).
 func (a *Rational) ToR() *Rational {
-	return wrap(a.r)
+	return a.clone()
 }
 
 // truncInt returns the value truncated toward zero, as a *big.Int. Quo on
 // big.Int truncates toward zero, matching Ruby's to_i / truncate.
 func (a *Rational) truncInt() *big.Int {
+	r := a.rat()
 	q := new(big.Int)
-	q.Quo(a.r.Num(), a.r.Denom())
+	q.Quo(r.Num(), r.Denom())
 	return q
 }
 
 // floorInt returns the greatest integer <= a (Ruby's Rational#floor).
 func (a *Rational) floorInt() *big.Int {
-	num, den := a.r.Num(), a.r.Denom()
+	br := a.rat()
+	num, den := br.Num(), br.Denom()
 	q, r := new(big.Int).QuoRem(num, den, new(big.Int))
 	if r.Sign() < 0 {
 		q.Sub(q, big.NewInt(1))
@@ -54,7 +56,8 @@ func (a *Rational) floorInt() *big.Int {
 
 // ceilInt returns the least integer >= a (Ruby's Rational#ceil).
 func (a *Rational) ceilInt() *big.Int {
-	num, den := a.r.Num(), a.r.Denom()
+	br := a.rat()
+	num, den := br.Num(), br.Denom()
 	q, r := new(big.Int).QuoRem(num, den, new(big.Int))
 	if r.Sign() > 0 {
 		q.Add(q, big.NewInt(1))
@@ -68,7 +71,8 @@ func (a *Rational) roundInt() *big.Int {
 	// floor(a + 1/2) is wrong at .5 for negatives; do it explicitly: scale the
 	// fractional comparison. Compute q = trunc, rem = a - q over den, then compare
 	// 2*|rem_num| with den.
-	num, den := a.r.Num(), a.r.Denom()
+	br := a.rat()
+	num, den := br.Num(), br.Denom()
 	q, r := new(big.Int).QuoRem(num, den, new(big.Int)) // r has sign of num
 	twice := new(big.Int).Mul(new(big.Int).Abs(r), big.NewInt(2))
 	if twice.Cmp(den) >= 0 { // halfway or beyond rounds away from zero
@@ -130,12 +134,12 @@ func (a *Rational) digit(o op, n int) (rat *Rational, integer *big.Int, isRat bo
 	pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(abs(n))), nil)
 	if n > 0 {
 		// Scale up by 10^n, apply the integer rule, divide back: a Rational.
-		scaled := wrap(new(big.Rat).Mul(a.r, new(big.Rat).SetInt(pow)))
+		scaled := wrap(new(big.Rat).Mul(a.rat(), new(big.Rat).SetInt(pow)))
 		i := scaled.applyInt(o)
 		return wrap(new(big.Rat).SetFrac(i, pow)), nil, true
 	}
 	// n < 0: scale down by 10^|n|, apply the rule, scale back up: an Integer.
-	scaled := wrap(new(big.Rat).Quo(a.r, new(big.Rat).SetInt(pow)))
+	scaled := wrap(new(big.Rat).Quo(a.rat(), new(big.Rat).SetInt(pow)))
 	i := scaled.applyInt(o)
 	return nil, i.Mul(i, pow), false
 }
