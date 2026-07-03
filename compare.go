@@ -7,17 +7,35 @@ package rational
 import (
 	"math"
 	"math/big"
+	"strconv"
 )
 
-// Cmp compares two Rationals, returning -1, 0 or +1 (Ruby's Rational#<=>).
+// Cmp compares two Rationals, returning -1, 0 or +1 (Ruby's Rational#<=>). When
+// both fit int64 it compares the cross-products in int64 (denominators are
+// positive, so the sign of a.num·b.den − b.num·a.den is the answer), falling back
+// to *big.Rat if either cross-product overflows.
 func (a *Rational) Cmp(b *Rational) int {
-	return a.r.Cmp(b.r)
+	if a.small && b.small {
+		l, ok1 := checkedMul(a.num, b.den)
+		r, ok2 := checkedMul(b.num, a.den)
+		if ok1 && ok2 {
+			switch {
+			case l < r:
+				return -1
+			case l > r:
+				return 1
+			default:
+				return 0
+			}
+		}
+	}
+	return a.rat().Cmp(b.rat())
 }
 
 // CmpInt compares with an Integer (Ruby's Rational#<=> Integer), returning -1, 0
 // or +1.
 func (a *Rational) CmpInt(n *big.Int) int {
-	return a.r.Cmp(new(big.Rat).SetInt(n))
+	return a.rat().Cmp(new(big.Rat).SetInt(n))
 }
 
 // CmpFloat compares with a Float (Ruby's Rational#<=> Float). The two booleans
@@ -37,12 +55,12 @@ func (a *Rational) CmpFloat(f float64) (c int, ok bool) {
 	// A finite float64 is exactly representable as a Rational; comparing the two
 	// rationals is exact and matches MRI, which compares the float's exact value.
 	bf := new(big.Rat).SetFloat64(f)
-	return a.r.Cmp(bf), true
+	return a.rat().Cmp(bf), true
 }
 
 // Eql reports a == b across two Rationals (Ruby's Rational#== with a Rational).
 func (a *Rational) Eql(b *Rational) bool {
-	return a.r.Cmp(b.r) == 0
+	return a.Cmp(b) == 0
 }
 
 // EqlInt reports a == n (Ruby's Rational#== Integer, e.g. (3/1) == 3 is true).
@@ -65,13 +83,17 @@ func (a *Rational) EqlStrict(b *Rational) bool {
 // Rationalize returns the Rational itself (Ruby's Rational#rationalize with no
 // argument: a Rational is already exact).
 func (a *Rational) Rationalize() *Rational {
-	return wrap(a.r)
+	return a.clone()
 }
 
 // ToS renders the value as Ruby's Rational#to_s — "num/den" with no parentheses,
-// always showing the denominator (e.g. "3/4", "-3/4", "0/1", "2/1").
+// always showing the denominator (e.g. "3/4", "-3/4", "0/1", "2/1"). A fast-path
+// value formats its int64 fields directly, avoiding any *big.Rat allocation.
 func (a *Rational) ToS() string {
-	return a.r.Num().String() + "/" + a.r.Denom().String()
+	if a.small {
+		return strconv.FormatInt(a.num, 10) + "/" + strconv.FormatInt(a.den, 10)
+	}
+	return a.big.Num().String() + "/" + a.big.Denom().String()
 }
 
 // Inspect renders the value as Ruby's Rational#inspect — the to_s form wrapped in
